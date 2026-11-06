@@ -35,7 +35,20 @@ The harness automatically extracts the supplied snapshot archives if needed.
 
 ## Verified public results
 
-The author's local public evaluation reached **0.9469 (94.69%)** on 40 supplied questions, with **zero runtime errors**, full consistency score, and full speed score. These figures are not hidden-test estimates. The code can still miss unseen phrasing, uncommon branches, or newly introduced page layouts.
+The author's local public evaluation reached **0.9643 (96.43%)** on 40 supplied questions, with **zero runtime errors**, full consistency score, and full speed score. These figures are not hidden-test estimates. The code can still miss unseen phrasing, uncommon branches, or newly introduced page layouts.
+
+## Additional local validation
+
+The implementation was also checked with locally constructed tests:
+
+| Test | Result |
+|---|---|
+| Reworded questions | 10/10 |
+| Historical-rate paraphrases | 4/4 |
+| Certificate product attribution | 6/6 |
+| Snapshot date selection | 15/15 |
+
+These tests checked question phrasing, historical rates, product distinctions, and snapshot selection. They are author-created checks, not part of the official public or hidden evaluation.
 
 ## Dependencies and files
 

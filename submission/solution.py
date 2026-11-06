@@ -537,6 +537,63 @@ class NaiveKnowledge:
                 if "/learn/" in url or "/blog/" in url:
                     score -= 6
 
+            # Keep IRA certificate products separate from
+            # standard certificates when the question specifies one.
+            asks_certificate_product = bool(re.search(
+                r"\b(?:certificate|certificates|cd|cds)\b",
+                question_lower
+            )) or (
+                "jumbo" in question_lower
+                and "month" in question_lower
+            )
+
+            if asks_certificate_product:
+                asks_roth = bool(re.search(
+                    r"\broth\b",
+                    question_lower
+                ))
+                asks_traditional = bool(re.search(
+                    r"\btraditional\s+ira\b",
+                    question_lower
+                ))
+
+                # Use the actual product row rather than simply
+                # checking whether the page mentions Roth.
+                rows = [
+                    line.strip().lower()
+                    for line in doc["text"].splitlines()
+                    if line.strip().startswith("|")
+                    and re.search(
+                        r"\b\d+\s+month\b",
+                        line,
+                        re.IGNORECASE
+                    )
+                    and "jumbo" in line.lower()
+                ]
+
+                if rows:
+                    has_roth_row = any(
+                        re.search(r"\broth\b", row)
+                        for row in rows
+                    )
+                    has_traditional_row = any(
+                        "traditional" in row
+                        for row in rows
+                    )
+                    has_standard_row = any(
+                        "roth" not in row
+                        and "traditional" not in row
+                        and "ira" not in row
+                        for row in rows
+                    )
+
+                    if asks_roth:
+                        score += 35 if has_roth_row else -35
+                    elif asks_traditional:
+                        score += 35 if has_traditional_row else -35
+                    elif "standard" in question_lower or "non-ira" in question_lower:
+                        score += 20 if has_standard_row else -20
+
             # Prefer home loan rate evidence over ARM explanations.
             if asks_mortgage and asks_rate:
                 if "fixed conventional" in passage:
@@ -772,6 +829,72 @@ class NaiveKnowledge:
                     )
 
 
+        # Handle reworded auto-financing rate questions using
+        # the exact model-year range and loan term.
+        auto_question = (
+            re.search(r"\b(?:auto|car|vehicle)\b", question_lower)
+            and any(word in question_lower for word in (
+                "loan", "financ", "apr", "interest", "rate"
+            ))
+        )
+
+        if auto_question:
+            term_match = re.search(
+                r"\b(\d{1,3})[\s-]*months?\b", question_lower
+            )
+            year_match = re.search(r"\b(20\d{2})\b", question_lower)
+
+            if term_match and year_match:
+                months = int(term_match.group(1))
+                year = int(year_match.group(1))
+
+                for doc in index["documents"]:
+                    url = doc["url"].rstrip("/").lower()
+
+                    if not url.endswith(
+                        "/personal/loans/auto-motorcycle-loans"
+                    ):
+                        continue
+
+                    for line in doc["text"].splitlines():
+                        match = re.search(
+                            r"\|\s*(20\d{2})-(\d{2,4})\s+"
+                            r"Model Year\s*\|\s*(\d+)\s+Months?"
+                            r"\s*\|\s*(\d+(?:\.\d+)?)%\s*APR",
+                            line,
+                            re.IGNORECASE
+                        )
+
+                        if not match:
+                            continue
+
+                        start = int(match.group(1))
+                        end_text = match.group(2)
+                        end = int(
+                            end_text if len(end_text) == 4
+                            else str(start)[:2] + end_text
+                        )
+                        row_months = int(match.group(3))
+                        apr = match.group(4)
+
+                        if start <= year <= end and row_months == months:
+                            return Answer(
+                                text=(
+                                    f"Dupaco lists an APR as low as "
+                                    f"{apr}% for a {months}-month "
+                                    f"auto loan on a {year} model-year "
+                                    "vehicle. Actual rates may vary."
+                                ),
+                                sources=[
+                                    Source(
+                                        url=doc["url"],
+                                        snapshot_id=selected["snapshot_id"],
+                                        quote=line[:200]
+                                    )
+                                ],
+                                confident=True
+                            )
+
         # Retrieve personal loan APR for a specified term.
         asks_personal_loan_apr = (
             "personal loan" in question_lower
@@ -917,9 +1040,21 @@ class NaiveKnowledge:
             any(term in question_lower for term in (
                 "certificate", "cd rate", "cd / certificate"
             ))
-            and any(term in question_lower for term in (
-                "link", "url", "website", "page"
-            ))
+            and (
+                any(term in question_lower for term in (
+                    "link", "url", "website", "page"
+                ))
+                or (
+                    "online" in question_lower
+                    and any(term in question_lower for term in (
+                        "where can i find",
+                        "where do i find",
+                        "where to find",
+                        "where can i see",
+                        "where do i see"
+                    ))
+                )
+            )
         )
 
         if asks_certificate_link:
@@ -930,28 +1065,68 @@ class NaiveKnowledge:
 
             for doc in index["documents"]:
                 passage = doc["text"]
+                page_url = doc["url"].split("#", 1)[0].rstrip("/").lower()
 
-                if (
-                    "personal/savings-account#rates"
-                    in passage
-                    or "personal/savings-account#rates"
-                    in doc["url"]
-                ):
+                if page_url != "https://www.dupaco.com/personal/savings-account":
+                    continue
+
+                if "personal/savings-account#rates" not in passage:
+                    continue
+
+                return Answer(
+                    text=(
+                        "You can view Dupaco's certificate "
+                        f"rates here: {target_url}"
+                    ),
+                    sources=[
+                        Source(
+                            url=target_url,
+                            snapshot_id=selected["snapshot_id"],
+                            quote=passage[:200]
+                        )
+                    ],
+                    confident=True
+                )
+
+        # Retrieve Dupaco's routing number from the official
+        # cash-management page in the selected snapshot.
+        if (
+            "routing number" in question_lower
+            or "aba number" in question_lower
+        ):
+            for doc in index["documents"]:
+                url = doc["url"].rstrip("/").lower()
+
+                if not url.endswith("/business/cash-management"):
+                    continue
+
+                for line in doc["text"].splitlines():
+                    match = re.search(
+                        r"(?:routing number|aba number)"
+                        r"[^\n]{0,100}?\b(\d{9})\b",
+                        line,
+                        re.IGNORECASE
+                    )
+
+                    if not match:
+                        continue
+
+                    routing_number = match.group(1)
+
                     return Answer(
                         text=(
-                            "You can view Dupaco's certificate "
-                            f"rates here: {target_url}"
+                            "Dupaco's routing number is "
+                            f"{routing_number}."
                         ),
                         sources=[
                             Source(
                                 url=doc["url"],
                                 snapshot_id=selected["snapshot_id"],
-                                quote=passage[:200]
+                                quote=line[:200]
                             )
                         ],
                         confident=True
                     )
-
 
         # Answer questions asking where to join Dupaco online.
         asks_online_join = (
@@ -2029,14 +2204,46 @@ class NaiveKnowledge:
                         for doc in related
                     )
 
+                    mortgage_sources = [
+                        Source(
+                            url=best["url"],
+                            snapshot_id=best["snapshot_id"]
+                        )
+                    ]
+
+                    # Add evidence from the dedicated home-loans
+                    # page without changing the selected rates.
+                    supporting_rows = []
+
+                    for doc in index["documents"]:
+                        url = doc["url"].rstrip("/").lower()
+
+                        if not url.endswith(
+                            "/personal/loans/home-loans"
+                        ):
+                            continue
+
+                        for line in doc["text"].splitlines():
+                            if "Purchase: 30-Year Fixed Conventional" not in line:
+                                continue
+
+                            if line in combined_text:
+                                supporting_rows.append((doc, line))
+
+                    if supporting_rows:
+                        doc, line = supporting_rows[0]
+
+                        mortgage_sources.append(
+                            Source(
+                                url=doc["url"],
+                                snapshot_id=selected["snapshot_id"],
+                                quote=line[:200]
+                            )
+                        )
+
                     return Answer(
                         text=combined_text[:1500],
-                        sources=[
-                            Source(
-                                url=best["url"],
-                                snapshot_id=best["snapshot_id"]
-                            )
-                        ],
+                        sources=mortgage_sources,
                         confident=True
                     )
 
@@ -2108,15 +2315,86 @@ class NaiveKnowledge:
 
 
 
+        answer_sources = [
+            Source(
+                url=best["url"],
+                snapshot_id=best["snapshot_id"],
+                quote=best["text"][:200]
+            )
+        ]
+
+        # Add supporting evidence for the same auto-loan rate,
+        # term, and model year from the official product page.
+        if asks_auto and asks_rate:
+            term_match = re.search(
+                r"\b(\d{1,3})[\s-]*months?\b",
+                question_lower
+            )
+            year_match = re.search(
+                r"\b(20\d{2})\b", question_lower
+            )
+            answer_rates = set(re.findall(
+                r"\d+(?:\.\d+)?%", best["text"]
+            ))
+
+            if term_match and year_match and answer_rates:
+                months = int(term_match.group(1))
+                year = int(year_match.group(1))
+
+                for doc in index["documents"]:
+                    url = doc["url"].rstrip("/").lower()
+
+                    if not url.endswith(
+                        "/personal/loans/auto-motorcycle-loans"
+                    ):
+                        continue
+
+                    for line in doc["text"].splitlines():
+                        range_match = re.search(
+                            r"\b(20\d{2})-(\d{2,4})\s+model year\b",
+                            line, re.IGNORECASE
+                        )
+                        row_term = re.search(
+                            r"\|\s*(\d+)\s+months?\s*\|",
+                            line, re.IGNORECASE
+                        )
+
+                        if not range_match or not row_term:
+                            continue
+
+                        start_year = int(range_match.group(1))
+                        end_text = range_match.group(2)
+                        end_year = int(
+                            end_text if len(end_text) == 4
+                            else str(start_year)[:2] + end_text
+                        )
+
+                        if not start_year <= year <= end_year:
+                            continue
+
+                        if int(row_term.group(1)) != months:
+                            continue
+
+                        if not any(
+                            rate in line for rate in answer_rates
+                        ):
+                            continue
+
+                        answer_sources.append(
+                            Source(
+                                url=doc["url"],
+                                snapshot_id=selected["snapshot_id"],
+                                quote=line[:200]
+                            )
+                        )
+                        break
+
+                    if len(answer_sources) > 1:
+                        break
+
         return Answer(
             text=best["text"][:1000],
-            sources=[
-                Source(
-                    url=best["url"],
-                    snapshot_id=best["snapshot_id"],
-                    quote=best["text"][:200]
-                )
-            ],
+            sources=answer_sources,
             confident=True
         )
 
